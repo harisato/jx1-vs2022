@@ -1,0 +1,399 @@
+{
+  "meta": {
+    "game": "Sword Online (Vo Lam 1)",
+    "engine_tick_rate": {
+      "GAME_FPS": 18,
+      "tick_ms": 55.56,
+      "note": "1 frame = 1000/18 ≈ 55.56ms. All frame counts below are in game ticks at 18 FPS."
+    },
+    "constants": {
+      "MAX_PERCENT": 100,
+      "MAX_RESIST": 95,
+      "GAME_UPDATE_TIME": 10,
+      "ATTACKACTION_EFFECT_PERCENT": 60,
+      "BASE_HIT_RECOVER": 6
+    },
+    "source_files": {
+      "KNpc.h": "Core/Src/KNpc.h",
+      "KNpc.cpp": "Core/Src/KNpc.cpp",
+      "KSkills.h": "Core/Src/KSkills.h",
+      "KSkillList.h": "Core/Src/KSkillList.h",
+      "SkillDef.h": "Core/Src/SkillDef.h",
+      "KNpcTemplate.cpp": "Core/Src/KNpcTemplate.cpp",
+      "KNpcSet.cpp": "Core/Src/KNpcSet.cpp",
+      "KNpcAttribModify.cpp": "Core/Src/KNpcAttribModify.cpp",
+      "KMagicAttrib.h": "Core/Src/KMagicAttrib.h",
+      "GameDataDef.h": "Core/Src/GameDataDef.h"
+    }
+  },
+
+  "state_machine": {
+    "description": "Flat FSM driven by NPCCMD enum. One state at a time, no sub-states or phases.",
+    "dispatcher": "KNpc::ProcStatus() — KNpc.cpp:609-673",
+    "frame_counter": {
+      "struct": "DOING_FRAME { nTotalFrame; nCurrentFrame; }",
+      "tick_fn": "WaitForFrame() — increments nCurrentFrame, returns TRUE when >= nTotalFrame",
+      "effect_fn": "IsReachFrame(percent) — returns TRUE when nCurrentFrame == nTotalFrame * percent / 100"
+    },
+    "states": {
+      "do_none":        { "value": 0,  "handler": null,          "description": "No-op" },
+      "do_stand":       { "value": 1,  "handler": "OnStand",     "description": "Idle/standing" },
+      "do_walk":        { "value": 2,  "handler": "OnWalk",      "description": "Walking" },
+      "do_run":         { "value": 3,  "handler": "OnRun",       "description": "Running" },
+      "do_jump":        { "value": 4,  "handler": "OnJump",      "description": "Jumping (parabolic)" },
+      "do_skill":       { "value": 5,  "handler": "OnSkill",     "description": "Skill startup (unused in dispatch, mapped to do_attack/do_magic)" },
+      "do_magic":       { "value": 6,  "handler": "OnSkill",     "description": "Casting magic skill" },
+      "do_attack":      { "value": 7,  "handler": "OnSkill",     "description": "Physical attack skill" },
+      "do_sit":         { "value": 8,  "handler": "OnSit",       "description": "Sitting (regen)" },
+      "do_hurt":        { "value": 9,  "handler": "OnHurt",      "description": "Hitstun" },
+      "do_death":       { "value": 10, "handler": "OnDeath",     "description": "Death animation" },
+      "do_defense":     { "value": 11, "handler": "OnDefense",   "description": "Blocking" },
+      "do_idle":        { "value": 12, "handler": "OnIdle",      "description": "Idle (empty handler)" },
+      "do_specialskill":{ "value": 13, "handler": null,          "description": "Special skill control (placeholder)" },
+      "do_special1":    { "value": 14, "handler": "OnSpecial1",  "description": "Blur attack (Melee_AttackWithBlur)" },
+      "do_special2":    { "value": 15, "handler": "OnSpecial2",  "description": "Thief skill action" },
+      "do_special3":    { "value": 16, "handler": "OnSpecial3",  "description": "Empty" },
+      "do_blurmove":    { "value": 17, "handler": "OnBlurMove",  "description": "Blur dash (Melee_MoveWithBlur)" },
+      "do_runattack":   { "value": 18, "handler": "OnRunAttack", "description": "Charge attack (Melee_RunAndAttack)" },
+      "do_manyattack":  { "value": 19, "handler": "OnManyAttack","description": "Multi-hit attack (Melee_ManyAttack)" },
+      "do_jumpattack":  { "value": 20, "handler": "OnJumpAttack","description": "Jump attack (Melee_JumpAndAttack)" },
+      "do_revive":      { "value": 21, "handler": "OnRevive",    "description": "Revive/respawn" }
+    }
+  },
+
+  "npc_base_frames": {
+    "description": "Default frame counts for NPC actions. Loaded from NpcSetting.ini per NPC template, or PlayerBaseValue for players.",
+    "defaults_npc": {
+      "m_StandFrame":   { "default": 15, "ini_key": "StandFrame",  "note": "Idle loop duration" },
+      "m_StandFrame1":  { "default": 15, "ini_key": "StandFrame1", "note": "Alternate idle" },
+      "m_WalkFrame":    { "default": 12, "ini_key": "WalkFrame",   "note": "Walk cycle frames" },
+      "m_RunFrame":     { "default": 15, "ini_key": "RunFrame",    "note": "Run cycle frames" },
+      "m_AttackFrame":  { "default": 20, "ini_key": "AttackSpeed", "note": "Physical attack animation length (confusingly named in ini)" },
+      "m_CastFrame":    { "default": 20, "ini_key": "CastSpeed",   "note": "Magic cast animation length" },
+      "m_HurtFrame":    { "default": 10, "ini_key": "HurtFrame",   "note": "Hitstun duration (server-side, modified by HitRecover)" },
+      "m_DeathFrame":   { "default": 15, "ini_key": "DeathFrame",  "note": "Death animation" },
+      "m_SitFrame":     { "default": 15, "ini_key": null,          "note": "Sit animation, hardcoded" },
+      "m_JumpFrame":    { "default": 40, "ini_key": null,          "note": "Jump arc duration, hardcoded" },
+      "m_ReviveFrame":  { "default": 100,"ini_key": "ReviveFrame", "note": "Server-side respawn timer (default 2400 for NPC templates)" },
+      "m_LoopFrames":   { "default": 0,  "ini_key": null,          "note": "Internal loop counter, incremented each tick" }
+    },
+    "defaults_player": {
+      "source": "KNpcSet::LoadPlayerBaseValue() from ServerCfg.ini [Common]",
+      "nAttackFrame":   { "default": 20, "ini_key": "AttackFrame" },
+      "nHurtFrame":     { "default": 12, "ini_key": "HurtFrame" },
+      "nWalkSpeed":     { "default": 5,  "ini_key": "WalkSpeed" },
+      "nRunSpeed":      { "default": 10, "ini_key": "RunSpeed" },
+      "client_only": {
+        "nStandFrame_male":   { "default": 15, "ini_key": "[Male] StandFrame" },
+        "nStandFrame_female": { "default": 15, "ini_key": "[Female] StandFrame" },
+        "nWalkFrame_male":    { "default": 15, "ini_key": "[Male] WalkFrame" },
+        "nWalkFrame_female":  { "default": 15, "ini_key": "[Female] WalkFrame" },
+        "nRunFrame_male":     { "default": 15, "ini_key": "[Male] RunFrame" },
+        "nRunFrame_female":   { "default": 15, "ini_key": "[Female] RunFrame" }
+      }
+    }
+  },
+
+  "action_frame_formulas": {
+    "physical_attack": {
+      "formula": "nTotalFrame = m_AttackFrame * MAX_PERCENT / (m_CurrentAttackSpeed + MAX_PERCENT)",
+      "formula_expanded": "nTotalFrame = m_AttackFrame * 100 / (m_CurrentAttackSpeed + 100)",
+      "post_process": "nTotalFrame -= nTotalFrame % 2 (round to even); clamp min 1",
+      "effect_at_frame": "nCurrentFrame == nTotalFrame * 60 / 100 (ATTACKACTION_EFFECT_PERCENT=60)",
+      "exit": "WaitForFrame() -> DoStand()",
+      "source": "KNpc.cpp:2169-2173",
+      "examples": {
+        "base_atkspd_0":   { "AttackFrame": 20, "CurrentAttackSpeed": 0,   "result_frames": 20, "effect_frame": 12, "ms": 1111 },
+        "atkspd_50":       { "AttackFrame": 20, "CurrentAttackSpeed": 50,  "result_frames": 12, "effect_frame": 7,  "ms": 667 },
+        "atkspd_100":      { "AttackFrame": 20, "CurrentAttackSpeed": 100, "result_frames": 10, "effect_frame": 6,  "ms": 556 }
+      }
+    },
+    "magic_cast": {
+      "formula": "nTotalFrame = m_CastFrame * MAX_PERCENT / (m_CurrentCastSpeed + MAX_PERCENT)",
+      "formula_expanded": "nTotalFrame = m_CastFrame * 100 / (m_CurrentCastSpeed + 100)",
+      "post_process": "same as physical",
+      "effect_at_frame": "same ATTACKACTION_EFFECT_PERCENT (60%)",
+      "source": "KNpc.cpp:2189-2193"
+    },
+    "hurt_hitstun": {
+      "formula_server": "nTotalFrame = m_HurtFrame * (MAX_PERCENT - m_CurrentHitRecover) / MAX_PERCENT",
+      "formula_expanded": "nTotalFrame = m_HurtFrame * (100 - m_CurrentHitRecover) / 100",
+      "skip_condition": "if m_CurrentHitRecover >= 100, hitstun is skipped entirely (immune)",
+      "min_frames": 1,
+      "exit": "WaitForFrame() -> DoStand() + m_ProcessAI = 1",
+      "source": "KNpc.cpp:1427-1466",
+      "examples": {
+        "base":            { "HurtFrame": 12, "HitRecover": 0,   "result_frames": 12, "ms": 667 },
+        "base_player":     { "HurtFrame": 12, "HitRecover": 6,   "result_frames": 11, "ms": 611 },
+        "fast_recover_50": { "HurtFrame": 12, "HitRecover": 50,  "result_frames": 6,  "ms": 333 },
+        "immune":          { "HurtFrame": 12, "HitRecover": 100, "result_frames": 0,  "ms": 0, "note": "returns immediately, no hurt state" }
+      }
+    },
+    "run_movement": {
+      "formula": "nTotalFrame = (m_RunFrame * m_RunSpeed) / m_CurrentRunSpeed",
+      "note": "RunFrame is the cycle length, adjusted by speed ratio",
+      "source": "KNpc.cpp:1778"
+    },
+    "blur_attack": {
+      "formula": "nTotalFrame = m_AttackFrame * MAX_PERCENT / (m_CurrentAttackSpeed + MAX_PERCENT)",
+      "state": "do_special1",
+      "effect_at": "60% frame",
+      "source": "KNpc.cpp:2286"
+    },
+    "jump_attack_phase1": {
+      "state": "do_jumpattack",
+      "step_0": "DoJump() — uses m_JumpFrame (40)",
+      "step_1_formula": "nTotalFrame = m_AttackFrame * MAX_PERCENT / (MAX_PERCENT + m_CurrentAttackSpeed)",
+      "effect_at": "60% of step_1 frames",
+      "source": "KNpc.cpp:5715-5770"
+    },
+    "run_attack": {
+      "state": "do_runattack",
+      "step_0": "Run phase — nTotalFrame = m_RunSpeed, runs until m_nCurrentMeleeTime > MissleGenerateTime(0) or do_stand",
+      "step_1": "Attack phase — nTotalFrame = 0 (instant effect at 60% check), then DoStand()",
+      "source": "KNpc.cpp:5549-5713"
+    },
+    "many_attack": {
+      "state": "do_manyattack",
+      "formula": "nTotalFrame = pSkill->GetMissleGenerateTime(m_SpecialSkillStep)",
+      "note": "Loops through ChildSkillNum iterations, each with its own frame duration from skill data",
+      "effect_per_hit": "WaitForFrame() -> cast child skill -> DoManyAttack() next step",
+      "source": "KNpc.cpp:5472-5547"
+    }
+  },
+
+  "skill_cooldown": {
+    "description": "Per-skill cooldown (not frame-based, uses real-time milliseconds via SubWorld.m_dwCurrentTime)",
+    "struct": "NPCSKILL { DWORD NextCastTime; int WaitCastTime; }",
+    "set_fn": "KSkillList::SetNextCastTime(skillId, currentTime, currentTime + dwCastTime)",
+    "check_fn": "KSkillList::CanCast(skillId, dwTime) — checks dwTime >= NextCastTime",
+    "per_skill_data": {
+      "m_nMinTimePerCast": {
+        "ini_key": "TimePerCast",
+        "default": 0,
+        "unit": "milliseconds (SubWorld time)",
+        "getter": "KSkill::GetDelayPerCast(bRideHorse)",
+        "source": "KSkills.h:82, KSkills.cpp:2135"
+      },
+      "m_nMinTimePerCastOnHorse": {
+        "ini_key": "TimePerCastOnHorse",
+        "default": 0,
+        "note": "Separate cooldown when riding horse",
+        "source": "KSkills.h:83, KSkills.cpp:2136"
+      },
+      "thief_skill_delay": {
+        "field": "m_ulDelayPerCast",
+        "ini_key": "TimePerCast",
+        "default": 40,
+        "source": "KThiefSkill.h:80, KThiefSkill.cpp:16,278"
+      }
+    }
+  },
+
+  "cc_states": {
+    "description": "Crowd control states. Processed in KNpc::Activate() before ProcStatus(). Each has nTime countdown (in ticks).",
+    "stun": {
+      "field": "m_StunState.nTime",
+      "behavior": "Blocks ALL actions (ProcStatus skipped) for nTime ticks",
+      "source": "KNpc.cpp:1044-1048",
+      "visual": "Stun sprite overlay (client)"
+    },
+    "freeze": {
+      "field": "m_FreezeState.nTime",
+      "behavior": "Blocks actions on ODD ticks only (nTime & 1). Effectively 50% slow.",
+      "source": "KNpc.cpp:991-998"
+    },
+    "frozen_action": {
+      "field": "m_FrozenAction.nTime",
+      "behavior": "Pure timer countdown, no direct action block",
+      "source": "KNpc.cpp:1013-1016"
+    },
+    "poison": {
+      "field": "m_PoisonState.nTime",
+      "behavior": "DoT every nValue[1] ticks, does NOT block actions",
+      "source": "KNpc.cpp:972-988"
+    },
+    "burn": {
+      "field": "m_BurnState.nTime",
+      "behavior": "Fire DoT every nValue[1] ticks, does NOT block actions",
+      "source": "KNpc.cpp:1000-1011"
+    },
+    "rand_move": {
+      "field": "m_RandMove.nTime",
+      "behavior": "Forces random movement, blocks AI (m_ProcessAI=0)",
+      "source": "KNpc.cpp:1018-1041"
+    },
+    "silent": {
+      "field": "m_SilentState",
+      "behavior": "Prevents skill casting"
+    },
+    "hide": {
+      "field": "m_HideState",
+      "behavior": "Stealth/invisibility"
+    }
+  },
+
+  "speed_modifiers": {
+    "attack_speed": {
+      "base_field": "m_AttackSpeed (default 0)",
+      "current_field": "m_CurrentAttackSpeed",
+      "magic_attrib": ["magic_attackspeed_v (115)", "magic_attackspeed_yan_v (239)"],
+      "modifier_fn": "KNpcAttribModify::AttackSpeedV — adds nValue[0] to m_CurrentAttackSpeed",
+      "effect": "Reduces physical attack frame duration via formula"
+    },
+    "cast_speed": {
+      "base_field": "m_CastSpeed (default 0)",
+      "current_field": "m_CurrentCastSpeed",
+      "magic_attrib": ["magic_castspeed_v (116)", "magic_castspeed_yan_v (240)"],
+      "modifier_fn": "KNpcAttribModify::CastSpeedV — adds nValue[0] to m_CurrentCastSpeed",
+      "effect": "Reduces magic cast frame duration via formula"
+    },
+    "hit_recover": {
+      "base_field": "m_HitRecover (NPC default 12, player BASE_HIT_RECOVER=6)",
+      "current_field": "m_CurrentHitRecover",
+      "magic_attrib": ["magic_fasthitrecover_v (113)", "magic_fasthitrecover_yan_v (245)"],
+      "modifier_fn": "KNpcAttribModify::FastHitRecoverV — adds nValue[0] to m_CurrentHitRecover",
+      "cap": ">=100 means immune to hitstun",
+      "effect": "Reduces hurt frame duration; at 100+ skips DoHurt entirely"
+    },
+    "do_hurt_chance": {
+      "magic_attrib": "magic_do_hurt_p (205)",
+      "description": "Percentage chance to inflict hitstun on target"
+    },
+    "anti_do_hurt": {
+      "magic_attrib": "magic_anti_do_hurt_p (223)",
+      "description": "Percentage chance to resist being put into hitstun"
+    },
+    "anti_hitrecover": {
+      "magic_attrib": "magic_anti_hitrecover (196)",
+      "description": "Counter to fast hit recovery"
+    },
+    "cc_duration_reduce": {
+      "freeze_reduce": "magic_freezetimereduce_p (106) -> m_CurrentFreezeTimeReducePercent",
+      "burn_reduce": "magic_burntimereduce_p (107)",
+      "poison_reduce": "magic_poisontimereduce_p (108)",
+      "stun_reduce": "magic_stuntimereduce_p (110)"
+    }
+  },
+
+  "missing_concepts": {
+    "hit_stop": {
+      "exists": false,
+      "note": "No freeze-frame on hit. Damage applied at 60% frame, animation continues uninterrupted."
+    },
+    "recovery_lock": {
+      "exists": false,
+      "note": "Actions end with immediate DoStand(). No recovery frames, no endlag, no commitment."
+    },
+    "combo_window": {
+      "exists": false,
+      "note": "No chain/cancel window. do_manyattack is a single skill with sub-steps, not player-driven combos. No input accepted during action frames."
+    },
+    "input_buffer": {
+      "exists": false,
+      "note": "No input queue. Commands are instant-or-drop. Client sends SendCommand(), server processes in current tick or ignores."
+    },
+    "sub_tick_phases": {
+      "exists": false,
+      "note": "Each game tick is atomic. Processing order: Activate() -> status effects -> ProcStatus(state handler) -> AI. No sub-division within a tick."
+    },
+    "cancel_interrupt": {
+      "exists": false,
+      "note": "No cancel mechanic. Once in do_attack/do_magic, must wait for WaitForFrame() to complete. Only external DoHurt() or DoDeath() can break out."
+    }
+  },
+
+  "melee_skill_types": {
+    "description": "Special melee forms (eMeleeForm enum, extends eMisslesForm). Each maps to a multi-step state machine via m_SpecialSkillStep.",
+    "types": {
+      "Melee_AttackWithBlur": {
+        "value": 8,
+        "state": "do_special1",
+        "steps": 1,
+        "frame_formula": "m_AttackFrame * 100 / (m_CurrentAttackSpeed + 100)",
+        "effect_at": "60%",
+        "visual": "Blur afterimage during attack"
+      },
+      "Melee_Jump": {
+        "value": 9,
+        "state": "do_jump",
+        "steps": 1,
+        "frame_formula": "m_JumpFrame (40)",
+        "note": "Pure movement, no damage"
+      },
+      "Melee_JumpAndAttack": {
+        "value": 10,
+        "state": "do_jumpattack",
+        "steps": 3,
+        "step_detail": {
+          "0_jump": "DoJump() — m_JumpFrame ticks",
+          "1_attack": "m_AttackFrame * 100 / (100 + m_CurrentAttackSpeed) ticks, effect at 60%",
+          "2_exit": "DoStand()"
+        }
+      },
+      "Melee_RunAndAttack": {
+        "value": 11,
+        "state": "do_runattack",
+        "steps": 3,
+        "step_detail": {
+          "0_run": "Run toward target, nTotalFrame = m_RunSpeed, runs until MissleGenerateTime(0) exceeded",
+          "1_attack": "Attack at 60% frame, cast child skill",
+          "2_exit": "DoStand()"
+        },
+        "note": "Casts child missle skill every tick during run phase AND at 60% during attack phase"
+      },
+      "Melee_ManyAttack": {
+        "value": 12,
+        "state": "do_manyattack",
+        "steps": "ChildSkillNum iterations",
+        "per_step_frames": "pSkill->GetMissleGenerateTime(step)",
+        "note": "Each step plays full frame count, then casts child skill and loops"
+      },
+      "Melee_MoveWithBlur": {
+        "value": 13,
+        "state": "do_blurmove",
+        "steps": 3,
+        "step_detail": {
+          "0_init": "Setup + teleport to destination",
+          "1_wait": "WaitForFrame() with movement frames",
+          "2_exit": "DoStand()"
+        },
+        "note": "Instant position change with blur visual"
+      }
+    }
+  },
+
+  "client_actions": {
+    "description": "Client-side visual states (CLIENTACTION enum). Map from server NPCCMD for rendering.",
+    "mapping": {
+      "cdo_fightstand": "Fighting stance idle",
+      "cdo_stand":      "Normal idle",
+      "cdo_stand1":     "Alternate idle (1/6 chance)",
+      "cdo_fightwalk":  "Fighting stance walk",
+      "cdo_walk":       "Normal walk",
+      "cdo_fightrun":   "Fighting stance run",
+      "cdo_run":        "Normal run",
+      "cdo_hurt":       "Hit reaction",
+      "cdo_death":      "Death animation",
+      "cdo_attack":     "Attack animation A (2/3 chance)",
+      "cdo_attack1":    "Attack animation B (1/3 chance)",
+      "cdo_magic":      "Magic cast animation",
+      "cdo_sit":        "Sitting",
+      "cdo_jump":       "Jump arc",
+      "cdo_none":       "No client action (server-only skill)"
+    }
+  },
+
+  "tick_processing_order": {
+    "description": "Per-NPC per-tick execution order in KNpc::Activate()",
+    "order": [
+      "1. Check m_bExchangeServer -> skip if transferring",
+      "2. Increment m_LoopFrames++",
+      "3. Process CC states (poison, freeze, burn, frozen, randmove, stun, life/mana regen, losemana) -> may block ProcStatus",
+      "4. Natural HP/MP/Stamina regen (every GAME_UPDATE_TIME=10 ticks, blocked during stun)",
+      "5. ProcStatus() -> switch(m_Doing) -> call OnXxx() handler",
+      "6. OnXxx() calls WaitForFrame()/IsReachFrame() -> advance frame counter -> trigger effects -> state transition",
+      "7. AI processing (if m_ProcessAI == 1)"
+    ]
+  }
+}
